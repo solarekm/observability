@@ -1,0 +1,27 @@
+# Git files
+.git
+.gitignore
+.github
+
+# Documentation
+*.md
+LICENSE
+
+# Build artifacts
+otelcol-custom/
+*.tar.gz
+*.zip
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+tmp/
+temp/

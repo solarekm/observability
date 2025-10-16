@@ -1,0 +1,210 @@
+name: Build OpenTelemetry Collector
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build type'
+        required: false
+        default: 'both'
+        type: choice
+        options:
+          - binary
+          - docker
+          - both
+
+env:
+  GO_VERSION: "1.25.3"
+  OCB_VERSION: "v0.137.0"
+
+jobs:
+  build-binary:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.build_type == 'binary' || github.event.inputs.build_type == 'both' }}
+    
+    outputs:
+      build-timestamp: ${{ steps.timestamp.outputs.timestamp }}
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Generate timestamp
+      id: timestamp
+      run: |
+        TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+        echo "timestamp=${TIMESTAMP}" >> $GITHUB_OUTPUT
+        echo "Generated timestamp: ${TIMESTAMP}"
+    
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        check-latest: true
+    
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+    
+    - name: Download OCB
+      run: |
+        curl --proto '=https' --tlsv1.2 -fL -o ocb \
+          https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/cmd%2Fbuilder%2F${{ env.OCB_VERSION }}/ocb_${{ env.OCB_VERSION }}_linux_amd64
+        chmod +x ocb
+    
+    - name: Verify OCB installation
+      run: ./ocb version
+    
+    - name: Build collector
+      working-directory: ./build
+      run: |
+        ../ocb --config builder-config.yaml --verbose
+    
+    - name: Test collector binary
+      working-directory: ./build
+      run: |
+        ./otelcol-dynatrace/otelcol-dynatrace --version
+    
+    - name: Upload binary artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: otelcol-dynatrace-linux-amd64-${{ steps.timestamp.outputs.timestamp }}
+        path: build/otelcol-dynatrace/
+        retention-days: 30
+
+  build-docker:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.build_type == 'docker' || github.event.inputs.build_type == 'both' }}
+    needs: [build-binary]
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Generate timestamp
+      id: timestamp
+      run: |
+        TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+        echo "timestamp=${TIMESTAMP}" >> $GITHUB_OUTPUT
+        echo "Generated timestamp: ${TIMESTAMP}"
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+    
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Build and push Docker image
+      working-directory: ./build
+      run: |
+        IMAGE_TAG=${{ steps.timestamp.outputs.timestamp }}
+        ECR_REGISTRY=${{ secrets.AWS_ECR_REGISTRY }}
+        
+        echo "Building image with tag: ${IMAGE_TAG}"
+        echo "ECR Registry: ${ECR_REGISTRY}"
+        
+        # Build image
+        docker buildx build \
+          --platform linux/amd64 \
+          --tag ${ECR_REGISTRY}:${IMAGE_TAG} \
+          --tag ${ECR_REGISTRY}:latest \
+          --push \
+          .
+        
+        echo "Docker image pushed successfully"
+        echo "Image URI: ${ECR_REGISTRY}:${IMAGE_TAG}"
+    
+    - name: Test Docker image
+      run: |
+        IMAGE_TAG=${{ steps.timestamp.outputs.timestamp }}
+        ECR_REGISTRY=${{ secrets.AWS_ECR_REGISTRY }}
+        
+        # Pull and test the image
+        docker pull ${ECR_REGISTRY}:${IMAGE_TAG}
+        timeout 10s docker run --rm ${ECR_REGISTRY}:${IMAGE_TAG} --version || true
+
+  validate-build:
+    runs-on: ubuntu-latest
+    needs: [build-binary, build-docker]
+    if: always() && (needs.build-binary.result == 'success' || needs.build-docker.result == 'success')
+    
+    steps:
+    - name: Download binary artifact
+      if: ${{ github.event.inputs.build_type == 'binary' || github.event.inputs.build_type == 'both' }}
+      uses: actions/download-artifact@v4
+      with:
+        name: otelcol-dynatrace-linux-amd64-${{ needs.build-binary.outputs.build-timestamp }}
+        path: ./binary
+    
+    - name: Validate binary
+      if: ${{ github.event.inputs.build_type == 'binary' || github.event.inputs.build_type == 'both' }}
+      run: |
+        chmod +x ./binary/otelcol-dynatrace
+        ./binary/otelcol-dynatrace --version
+        echo "✅ Binary validation successful"
+    
+    - name: Configure AWS credentials for validation
+      if: ${{ github.event.inputs.build_type == 'docker' || github.event.inputs.build_type == 'both' }}
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+    
+    - name: Login to Amazon ECR for validation
+      if: ${{ github.event.inputs.build_type == 'docker' || github.event.inputs.build_type == 'both' }}
+      uses: aws-actions/amazon-ecr-login@v2
+    
+    - name: Validate Docker image in ECR
+      if: ${{ github.event.inputs.build_type == 'docker' || github.event.inputs.build_type == 'both' }}
+      run: |
+        TIMESTAMP=${{ needs.build-binary.outputs.build-timestamp }}
+        ECR_REGISTRY=${{ secrets.AWS_ECR_REGISTRY }}
+        
+        echo "Validating image: ${ECR_REGISTRY}:${TIMESTAMP}"
+        docker pull ${ECR_REGISTRY}:${TIMESTAMP}
+        docker run --rm ${ECR_REGISTRY}:${TIMESTAMP} --version
+        echo "✅ Docker image validation successful"
+    
+    - name: Build summary
+      run: |
+        TIMESTAMP=${{ needs.build-binary.outputs.build-timestamp }}
+        ECR_REGISTRY=${{ secrets.AWS_ECR_REGISTRY }}
+        
+        echo "## Build Summary 🚀" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Configuration" >> $GITHUB_STEP_SUMMARY
+        echo "- **Go Version:** ${{ env.GO_VERSION }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **OCB Version:** ${{ env.OCB_VERSION }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Build Timestamp:** ${TIMESTAMP}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Build Type:** ${{ github.event.inputs.build_type }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Components Included" >> $GITHUB_STEP_SUMMARY
+        echo "- **Exporters:** debugexporter (external)" >> $GITHUB_STEP_SUMMARY
+        echo "- **Receivers:** otlpreceiver (external), dynatracereceiver (local)" >> $GITHUB_STEP_SUMMARY
+        echo "- **Processors:** transformprocessor (local), filterprocessor (local), batchprocessor (external)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Artifacts" >> $GITHUB_STEP_SUMMARY
+        if [[ "${{ github.event.inputs.build_type }}" == "binary" || "${{ github.event.inputs.build_type }}" == "both" ]]; then
+          echo "- 📦 **Binary:** otelcol-dynatrace-linux-amd64-${TIMESTAMP}" >> $GITHUB_STEP_SUMMARY
+        fi
+        if [[ "${{ github.event.inputs.build_type }}" == "docker" || "${{ github.event.inputs.build_type }}" == "both" ]]; then
+          echo "- 🐳 **Docker Image:** ${ECR_REGISTRY}:${TIMESTAMP}" >> $GITHUB_STEP_SUMMARY
+          echo "- 🐳 **Latest Tag:** ${ECR_REGISTRY}:latest" >> $GITHUB_STEP_SUMMARY
+        fi
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "✅ **Build completed successfully!**" >> $GITHUB_STEP_SUMMARY

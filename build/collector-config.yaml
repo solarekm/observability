@@ -1,0 +1,87 @@
+receivers:
+  # OTLP receiver for traces, metrics, and logs
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+  
+  # Dynatrace receiver configuration
+  # Note: Configure with your Dynatrace environment details
+  dynatrace:
+    # Add your Dynatrace configuration here
+    # endpoint: "https://your-environment.dynatrace.com"
+    # api_token: "${DYNATRACE_API_TOKEN}"
+    
+processors:
+  # Batch processor - groups data before sending
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+
+  # Transform processor - modify telemetry data
+  transform:
+    # Example transformations (customize as needed)
+    trace_statements:
+      - context: span
+        statements:
+          - set(attributes["environment"], "production") where attributes["environment"] == nil
+    
+    metric_statements:
+      - context: datapoint
+        statements:
+          - set(attributes["processed_by"], "otelcol-custom")
+    
+    log_statements:
+      - context: log
+        statements:
+          - set(attributes["log_source"], "otelcol-custom")
+
+  # Filter processor - filter out unwanted data
+  filter:
+    # Example filters (customize as needed)
+    traces:
+      span:
+        - 'attributes["http.status_code"] != nil and attributes["http.status_code"] >= 400'
+    
+    metrics:
+      datapoint:
+        - 'metric.name == "system.cpu.utilization"'
+    
+    logs:
+      log_record:
+        - 'severity_text != "DEBUG"'
+
+exporters:
+  # Debug exporter for development and testing
+  debug:
+    verbosity: detailed
+    sampling_initial: 5
+    sampling_thereafter: 200
+
+service:
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      address: 0.0.0.0:8888
+
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch, transform, filter]
+      exporters: [debug]
+    
+    metrics:
+      receivers: [otlp]
+      processors: [batch, transform, filter]
+      exporters: [debug]
+    
+    logs:
+      receivers: [otlp]
+      processors: [batch, transform, filter]
+      exporters: [debug]
+
+  extensions: []
