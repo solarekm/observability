@@ -5,7 +5,7 @@ FROM alpine:3.20 AS certs
 RUN apk --update add ca-certificates
 
 # Stage 2: Build the collector
-FROM golang:1.25.3-alpine AS build-stage
+FROM golang:1.24-alpine AS build-stage
 
 # Install build dependencies
 RUN apk add --no-cache git

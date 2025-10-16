@@ -14,7 +14,7 @@ on:
           - both
 
 env:
-  GO_VERSION: "1.25.3"
+  GO_VERSION: "1.24"
   OCB_VERSION: "v0.137.0"
 
 jobs:
@@ -81,7 +81,9 @@ jobs:
   build-docker:
     runs-on: ubuntu-latest
     if: ${{ github.event.inputs.build_type == 'docker' || github.event.inputs.build_type == 'both' }}
-    needs: [build-binary]
+    
+    outputs:
+      docker-timestamp: ${{ steps.timestamp.outputs.timestamp }}
     
     steps:
     - name: Checkout repository
@@ -143,11 +145,29 @@ jobs:
     if: always() && (needs.build-binary.result == 'success' || needs.build-docker.result == 'success')
     
     steps:
+    - name: Set timestamps for validation
+      id: timestamps
+      run: |
+        BINARY_TIMESTAMP="${{ needs.build-binary.outputs.build-timestamp }}"
+        DOCKER_TIMESTAMP="${{ needs.build-docker.outputs.docker-timestamp }}"
+        
+        if [[ "${{ github.event.inputs.build_type }}" == "both" ]]; then
+          echo "binary-timestamp=${BINARY_TIMESTAMP}" >> $GITHUB_OUTPUT
+          echo "docker-timestamp=${BINARY_TIMESTAMP}" >> $GITHUB_OUTPUT
+          echo "Using binary timestamp for both: ${BINARY_TIMESTAMP}"
+        elif [[ "${{ github.event.inputs.build_type }}" == "binary" ]]; then
+          echo "binary-timestamp=${BINARY_TIMESTAMP}" >> $GITHUB_OUTPUT
+          echo "Using binary timestamp: ${BINARY_TIMESTAMP}"
+        else
+          echo "docker-timestamp=${DOCKER_TIMESTAMP}" >> $GITHUB_OUTPUT
+          echo "Using docker timestamp: ${DOCKER_TIMESTAMP}"
+        fi
+    
     - name: Download binary artifact
       if: ${{ github.event.inputs.build_type == 'binary' || github.event.inputs.build_type == 'both' }}
       uses: actions/download-artifact@v4
       with:
-        name: otelcol-dynatrace-linux-amd64-${{ needs.build-binary.outputs.build-timestamp }}
+        name: otelcol-dynatrace-linux-amd64-${{ steps.timestamps.outputs.binary-timestamp }}
         path: ./binary
     
     - name: Validate binary
@@ -172,7 +192,11 @@ jobs:
     - name: Validate Docker image in ECR
       if: ${{ github.event.inputs.build_type == 'docker' || github.event.inputs.build_type == 'both' }}
       run: |
-        TIMESTAMP=${{ needs.build-binary.outputs.build-timestamp }}
+        if [[ "${{ github.event.inputs.build_type }}" == "both" ]]; then
+          TIMESTAMP=${{ steps.timestamps.outputs.binary-timestamp }}
+        else
+          TIMESTAMP=${{ steps.timestamps.outputs.docker-timestamp }}
+        fi
         ECR_REGISTRY=${{ secrets.AWS_ECR_REGISTRY }}
         
         echo "Validating image: ${ECR_REGISTRY}:${TIMESTAMP}"
@@ -182,7 +206,13 @@ jobs:
     
     - name: Build summary
       run: |
-        TIMESTAMP=${{ needs.build-binary.outputs.build-timestamp }}
+        if [[ "${{ github.event.inputs.build_type }}" == "both" ]]; then
+          TIMESTAMP=${{ steps.timestamps.outputs.binary-timestamp }}
+        elif [[ "${{ github.event.inputs.build_type }}" == "binary" ]]; then
+          TIMESTAMP=${{ steps.timestamps.outputs.binary-timestamp }}
+        else
+          TIMESTAMP=${{ steps.timestamps.outputs.docker-timestamp }}
+        fi
         ECR_REGISTRY=${{ secrets.AWS_ECR_REGISTRY }}
         
         echo "## Build Summary 🚀" >> $GITHUB_STEP_SUMMARY
