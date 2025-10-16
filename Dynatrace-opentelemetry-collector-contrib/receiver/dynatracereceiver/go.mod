@@ -1,4 +1,4 @@
-module github.com/MaCriMora/Dynatrace-opentelemetry-collector-contrib/receiver/dynatracereceiver
+module github.com/solarekm/observability/Dynatrace-opentelemetry-collector-contrib/receiver/dynatracereceiver
 
 go 1.23.0
 
